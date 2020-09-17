@@ -13,11 +13,10 @@ from aiocache import cached, Cache
 from aiocache.serializers import JsonSerializer
 from aiocache.plugins import HitMissRatioPlugin, TimingPlugin, BasePlugin
 
-from foreman_cache.utils import load_config
+from foreman_cache.utils import load_config, load_sslcontext
 
 RESPONSE_OK = [
 200,
-201,
 ]
 
 PROJ_ROOT = pathlib.Path(__file__).parent.parent
@@ -35,27 +34,11 @@ async def fget(uri, cache, user, password, request, ttl=3600):
     headers={"Authorization": "Basic %s"%b64_auth,
              'User-Agent': 'foreman-lookup-cache'}
 
-    if request.app['config']['foreman']['scheme'] == 'https':
-        if 'cafile' in request.app['config']['foreman']:
-            if 'sslverify' in request.app['config']['foreman']:
-                if request.app['config']['foreman']['sslverify']:
-                    sslcontext = ssl.create_default_context( cafile=request.app['config']['foreman']['cafile'])
-                else:
-                    sslcontext=False
-        else:
-            if 'sslverify' in request.app['config']['foreman']:
-                if request.app['config']['foreman']['sslverify']:
-                    sslcontext=True
-                else:
-                    sslcontext=False
-            else:
-                sslcontext=True
-    else:
-        sslcontext=None
+    sslcontext = load_sslcontext(request)
 
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get('%s'%uri, ssl=sslcontext) as response:
+            async with session.get('%s'%uri, ssl=sslcontext, allow_redirects=False) as response:
 
                 json = await response.json()
                 if response.status in RESPONSE_OK:
@@ -86,27 +69,11 @@ async def fgetp1(request):
     headers={"Authorization": "Basic %s"%b64_auth,
              'User-Agent': 'foreman-lookup-cache'}
 
-    if request.app['config']['foreman']['scheme'] == 'https':
-        if 'cafile' in request.app['config']['foreman']:
-            if 'sslverify' in request.app['config']['foreman']:
-                if request.app['config']['foreman']['sslverify']:
-                    sslcontext = ssl.create_default_context( cafile=request.app['config']['foreman']['cafile'])
-                else:
-                    sslcontext=False
-        else:
-            if 'sslverify' in request.app['config']['foreman']:
-                if request.app['config']['foreman']['sslverify']:
-                    sslcontext=True
-                else:
-                    sslcontext=False
-            else:
-                sslcontext=True
-    else:
-        sslcontext=None
+    sslcontext = load_sslcontext(request)
 
     try:
         async with aiohttp.ClientSession(headers=headers) as session:
-            async with session.get('%s%s'%(url, path), params=params, ssl=sslcontext) as response:
+            async with session.get('%s%s'%(url, path), params=params, ssl=sslcontext, allow_redirects=False) as response:
 
                 if response.status in RESPONSE_OK:
                     json = await response.json()
