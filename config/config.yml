@@ -1,0 +1,36 @@
+---
+# main
+host: '*'
+port: 8223
+scheme: https
+sslcertchain: 'ssl/foreman_cache-localhost.crt'
+sslkey: 'ssl/foreman_cache-localhost.key'
+access_log_format: '%a %t "%r" %s %b "%{Referer}i" "%{User-Agent}i" %Tf'
+allowed_hosts: '*'
+authentication:
+  user: 'foreman'
+  password: 'foreman'
+  realm: 'foreman'
+allowed_items:
+  - 'domains'
+  - 'environments'
+  - 'fact_values'
+  - 'hosts'
+  - 'hostgroups'
+  - 'puppetclasses'
+  - 'smart_proxies'
+  - 'subnets'
+  - 'organizations'
+# foreman service
+foreman:
+  host: localhost
+  port: 8233
+  scheme: https
+  cafile: 'ssl/ca_chain.pem'
+  sslverify: False
+  user: 'foreman'
+  password: 'foreman'
+# cache
+cache:
+  ttl: 3600
+  auto_refresh: true
