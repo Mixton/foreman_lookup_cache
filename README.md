@@ -5,6 +5,7 @@
 * pyyaml
 * aiohttp_remotes
 * gunicorn
+* psutil
 
 gunicorn foreman_cache.gunicorn:cache -c config/gunicorn.conf.py 
 

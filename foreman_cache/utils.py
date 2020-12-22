@@ -28,3 +28,12 @@ def load_sslcontext(request):
         sslcontext=None
 
     return sslcontext
+
+def memory_usage():
+    # return the memory usage in Bytes
+    import psutil
+    import os
+    process = psutil.Process(os.getpid())
+    #mem = process.memory_info()
+    mem = psutil.virtual_memory().used
+    return mem

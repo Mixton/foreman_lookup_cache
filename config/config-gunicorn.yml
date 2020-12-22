@@ -28,3 +28,9 @@ foreman:
 cache:
   ttl: 3600
   auto_refresh: true
+statsd:
+  enable: true
+  host: 127.0.0.1
+  port: 8125
+  prefix: 'foreman_cache'
+  interval: 10

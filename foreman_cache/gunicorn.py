@@ -5,6 +5,10 @@ import json
 import pathlib
 import ssl
 import base64
+import time
+import os
+import statsd
+import socket
 
 from aiohttp_remotes import BasicAuth, Secure, AllowedHosts, setup
 from datetime import datetime
@@ -12,14 +16,54 @@ from aiohttp import web
 from aiocache import cached, Cache
 from aiocache.serializers import JsonSerializer
 from aiocache.plugins import HitMissRatioPlugin, TimingPlugin, BasePlugin
+from threading import Thread
 
-from foreman_cache.utils import load_config, load_sslcontext
+from foreman_cache.utils import load_config, load_sslcontext, memory_usage
 
 RESPONSE_OK = [
 200,
 ]
 
 PROJ_ROOT = pathlib.Path(__file__).parent.parent
+
+from threading import Timer, currentThread
+
+class MetricsTimer(object):
+    def __init__(self, interval, function, *args, **kwargs):
+        self._timer     = None
+        self.interval   = interval
+        self.function   = function
+        self.args       = args
+        self.kwargs     = kwargs
+        self.is_running = False
+        self.start()
+
+    def _run(self):
+        self.is_running = False
+        self.start()
+        self.function(*self.args, **self.kwargs)
+
+    def start(self):
+        if not self.is_running:
+            self._timer = Timer(self.interval, self._run)
+            self._timer.start()
+            self.is_running = True
+
+    def stop(self):
+        self._timer.cancel()
+        self.is_running = False
+
+def cache_metrics(cache, statsd, hostname):
+    if hasattr(cache, 'hit_miss_ratio'):
+        hitratio = cache.hit_miss_ratio
+        for metric in hitratio:
+            statsd.gauge('%s.%i.hitratio.%s'%(hostname, os.getpid(),metric), hitratio[metric])
+    if hasattr(cache, 'profiling'):
+        profiling = cache.profiling
+        for metric in profiling:
+            statsd.gauge('%s.%i.profiling.%s'%(hostname, os.getpid(),metric), profiling[metric])
+
+    statsd.gauge('%s.%i.profiling.memory.used'%(hostname, os.getpid()), memory_usage())
 
 async def fget(uri, cache, user, password, request, ttl=3600):
     is_cached = await cache.exists(uri)
@@ -112,11 +156,18 @@ async def method(request):
 async def cache():
     conf = load_config(PROJ_ROOT / 'config' / 'config-gunicorn.yml')
 
+    logging.basicConfig(level=logging.INFO)
     app = web.Application()
 
     app.router.add_route('GET', "/api/v2/{item}", method)
     app.router.add_route('GET', "/api/{item}", method)
     cache = Cache(plugins=[HitMissRatioPlugin(), TimingPlugin()])
+
+    if 'statsd' in conf:
+        if conf['statsd']['enable']:
+            hostname = socket.gethostname().split('.', 1)[0]
+            c = statsd.StatsClient(conf['statsd']['host'], conf['statsd']['port'], prefix=conf['statsd']['prefix'])
+            t = MetricsTimer(conf['statsd']['interval'], cache_metrics, cache, c, hostname)
 
     app['config'] = conf
 
