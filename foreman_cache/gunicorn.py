@@ -228,8 +228,10 @@ async def cache():
     app.router.add_route('GET', "/api/v2/{item}/{domain}", method)
     app.router.add_route('GET', "/api/{item}", method)
     app.router.add_route('GET', "/api/{item}/{domain}", method)
+    memcached_host = conf['cache']['memcached_host']
+    memcached_port = conf['cache']['memcached_port']
     #cache = Cache(plugins=[HitMissRatioPlugin(), TimingPlugin()])
-    cache = Cache(Cache.MEMCACHED, endpoint="127.0.0.1", port=11211, serializer=JsonSerializer(), plugins=[HitMissRatioPlugin(), TimingPlugin()])
+    cache = Cache(Cache.MEMCACHED, endpoint=memcached_host, port=memcached_port, serializer=JsonSerializer(), plugins=[HitMissRatioPlugin(), TimingPlugin()])
 
     if 'statsd' in conf:
         if conf['statsd']['enable']:

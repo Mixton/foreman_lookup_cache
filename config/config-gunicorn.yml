@@ -28,6 +28,8 @@ foreman:
 cache:
   ttl: 3600
   auto_refresh: true
+  memcached_host: localhost
+  memcached_port: 11211
 statsd:
   enable: true
   host: 127.0.0.1
