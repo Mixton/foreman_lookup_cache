@@ -17,8 +17,12 @@ async def method(request):
     result = {}
     if request.match_info['item']:
         if int(request.rel_url.query['per_page']) == 1:
-            with open('hosts-perpage1.json') as json_file:
-                result = json.load(json_file)
+            if request.match_info['item'] == 'fact_values':
+                with open('hosts-perpage1-facts.json') as json_file:
+                    result = json.load(json_file)
+            else:
+                with open('hosts-perpage1.json') as json_file:
+                    result = json.load(json_file)
         else:
             await asyncio.sleep(randrange(0, 20))
             with open('hosts-perpagefull.json') as json_file:

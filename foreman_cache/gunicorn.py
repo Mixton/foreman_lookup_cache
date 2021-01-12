@@ -9,7 +9,9 @@ import time
 import os
 import statsd
 import socket
+import hashlib
 
+from urllib.parse import urlencode, quote
 from aiohttp_remotes import BasicAuth, Secure, AllowedHosts, setup
 from datetime import datetime
 from aiohttp import web
@@ -22,6 +24,17 @@ from foreman_cache.utils import load_config, load_sslcontext, memory_usage
 
 RESPONSE_OK = [
 200,
+]
+
+SUPPORTED_ITEMS = [
+'environments',
+'hosts',
+'subnets',
+'organizations'
+]
+
+SPECIAL_ITEMS = [
+'fact_values',
 ]
 
 PROJ_ROOT = pathlib.Path(__file__).parent.parent
@@ -65,15 +78,38 @@ def cache_metrics(cache, statsd, hostname):
 
     statsd.gauge('%s.%i.profiling.memory.used'%(hostname, os.getpid()), memory_usage())
 
-async def fget(uri, cache, user, password, request, ttl=3600):
-    is_cached = await cache.exists(uri)
+
+async def nocache(uri, request):
+    auth = "%s:%s"%(request.app['config']['foreman']['user'], request.app['config']['foreman']['password'])
+    b64_auth = base64.b64encode(auth.encode('ascii')).decode('ascii')
+    headers={"Authorization": "Basic %s"%b64_auth,
+             'User-Agent': 'foreman-lookup-cache'}
+
+    sslcontext = load_sslcontext(request)
+
+    try:
+        async with aiohttp.ClientSession(headers=headers) as session:
+            async with session.get('%s'%uri, ssl=sslcontext, allow_redirects=False) as response:
+
+                json = await response.json()
+    except aiohttp.ClientConnectorError as e:
+        print("Cannot connect to %s %s"%(uri,e))
+        pass
+
+    return json
+
+
+async def fget(uri, cache, request, ttl=3600):
+    cache_url = hashlib.md5(quote(uri).encode()).hexdigest()
+    is_cached = await cache.exists(cache_url)
     if is_cached:
-        result = await cache.get(uri)
+        result = await cache.get(cache_url)
         if result is not None:
             return result
     json = {}
     json['subtotal'] = -1
-    auth = "%s:%s"%(user, password)
+    #auth = "%s:%s"%(user, password)
+    auth = "%s:%s"%(request.app['config']['foreman']['user'], request.app['config']['foreman']['password'])
     b64_auth = base64.b64encode(auth.encode('ascii')).decode('ascii')
     headers={"Authorization": "Basic %s"%b64_auth,
              'User-Agent': 'foreman-lookup-cache'}
@@ -86,7 +122,7 @@ async def fget(uri, cache, user, password, request, ttl=3600):
 
                 json = await response.json()
                 if response.status in RESPONSE_OK:
-                    await cache.set(uri, json, ttl=ttl)
+                    await cache.set(cache_url, json, ttl=ttl)
     except aiohttp.ClientConnectorError as e:
         print("Cannot connect to %s %s"%(uri,e))
         pass
@@ -94,11 +130,10 @@ async def fget(uri, cache, user, password, request, ttl=3600):
     return json
 
 
-@cached(ttl=60, serializer=JsonSerializer())
-async def fgetp1(request):
+#@cached(ttl=60, serializer=JsonSerializer())
+#async def fgetp1(request):
+async def fgetp1(request, cache, ttl=60):
 
-    json = {}
-    json['subtotal'] = -1
     params = {}
 
     for qstring in request.rel_url.query:
@@ -107,7 +142,22 @@ async def fgetp1(request):
     params['per_page'] = 1
     path = request.rel_url.path
 
+    #url = urlencode('%s://%s:%s'%(request.app['config']['foreman']['scheme'], request.app['config']['foreman']['host'], request.app['config']['foreman']['port']))
     url = '%s://%s:%s'%(request.app['config']['foreman']['scheme'], request.app['config']['foreman']['host'], request.app['config']['foreman']['port'])
+
+    qstr = urlencode(params)
+    clean_url = '%s%s?%s'%(url, path, qstr)
+    cache_url = hashlib.md5(clean_url.encode()).hexdigest()
+    print(cache_url)
+
+    is_cached = await cache.exists(cache_url)
+    if is_cached:
+        result = await cache.get(cache_url)
+        if result is not None:
+            return result['subtotal']
+
+    json = {}
+    json['subtotal'] = -1
     auth = "%s:%s"%(request.app['config']['foreman']['user'], request.app['config']['foreman']['password'])
     b64_auth = base64.b64encode(auth.encode('ascii')).decode('ascii')
     headers={"Authorization": "Basic %s"%b64_auth,
@@ -121,6 +171,7 @@ async def fgetp1(request):
 
                 if response.status in RESPONSE_OK:
                     json = await response.json()
+                    await cache.set(cache_url, json, ttl=ttl)
     except aiohttp.ClientConnectorError as e:
         print("Cannot connect to %s %s"%(url,e))
         pass
@@ -130,23 +181,37 @@ async def fgetp1(request):
 async def method(request):
     cache = request.app['cache']
     ttl = request.app['config']['cache']['ttl']
+    #uri = urlencode('%s://%s:%s%s'%(request.app['config']['foreman']['scheme'], request.app['config']['foreman']['host'], request.app['config']['foreman']['port'], request.rel_url))
     uri = '%s://%s:%s%s'%(request.app['config']['foreman']['scheme'], request.app['config']['foreman']['host'], request.app['config']['foreman']['port'], request.rel_url)
     result = {}
+
     if request.match_info['item'] not in request.app['config']['allowed_items']:
         return web.Response(status=404)
 
-    subtotalp1 = await fgetp1(request)
+    if request.match_info['item'] in SPECIAL_ITEMS:
+        foreman_lookup = await fget(uri, cache, request, ttl=ttl)
+        if 'subtotal' in foreman_lookup:
+            if foreman_lookup['subtotal'] < 0:
+                return web.Response(status=502)
 
-    response = await fget(uri, cache, request.app['config']['foreman']['user'], request.app['config']['foreman']['password'], request, ttl=ttl)
+        return web.json_response(foreman_lookup)
 
-    in_cache = await cache.exists(uri)
+    if request.match_info['item'] not in SUPPORTED_ITEMS:
+        return web.json_response(await nocache(uri, request))  
+
+    subtotalp1 = await fgetp1(request, cache)
+
+    response = await fget(uri, cache, request, ttl=ttl)
+
+    cache_url = hashlib.md5(quote(uri).encode()).hexdigest()
+    in_cache = await cache.exists(cache_url)
     if 'subtotal' in response:
         if response['subtotal'] != subtotalp1 and in_cache and subtotalp1 > -1:
             print("need to reload from foreman: %s / %s"%(response['subtotal'], subtotalp1))
-            del_id = await cache.delete(uri)
+            del_id = await cache.delete(cache_url)
             print("cache remove for %s id: %s"%(uri, del_id))
 
-    foreman_lookup = await fget(uri, cache, request.app['config']['foreman']['user'], request.app['config']['foreman']['password'], request, ttl=ttl)
+    foreman_lookup = await fget(uri, cache, request, ttl=ttl)
     if 'subtotal' in foreman_lookup:
         if foreman_lookup['subtotal'] < 0:
             return web.Response(status=502)
@@ -156,12 +221,15 @@ async def method(request):
 async def cache():
     conf = load_config(PROJ_ROOT / 'config' / 'config-gunicorn.yml')
 
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.DEBUG)
     app = web.Application()
 
     app.router.add_route('GET', "/api/v2/{item}", method)
+    app.router.add_route('GET', "/api/v2/{item}/{domain}", method)
     app.router.add_route('GET', "/api/{item}", method)
-    cache = Cache(plugins=[HitMissRatioPlugin(), TimingPlugin()])
+    app.router.add_route('GET', "/api/{item}/{domain}", method)
+    #cache = Cache(plugins=[HitMissRatioPlugin(), TimingPlugin()])
+    cache = Cache(Cache.MEMCACHED, endpoint="127.0.0.1", port=11211, serializer=JsonSerializer(), plugins=[HitMissRatioPlugin(), TimingPlugin()])
 
     if 'statsd' in conf:
         if conf['statsd']['enable']:
