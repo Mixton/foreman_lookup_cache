@@ -66,7 +66,7 @@ class MetricsTimer(object):
         self._timer.cancel()
         self.is_running = False
 
-def cache_metrics(cache, statsd, hostname):
+def cache_metrics(cache, lookup_type, statsd, hostname):
     if hasattr(cache, 'hit_miss_ratio'):
         hitratio = cache.hit_miss_ratio
         for metric in hitratio:
@@ -75,6 +75,50 @@ def cache_metrics(cache, statsd, hostname):
         profiling = cache.profiling
         for metric in profiling:
             statsd.gauge('%s.%i.profiling.%s'%(hostname, os.getpid(),metric), profiling[metric])
+
+    if 'items' in lookup_type:
+        for ltype in lookup_type['items']:
+            if 'nb' in lookup_type['items'][ltype]:
+                tvalue = lookup_type['items'][ltype]['nb']
+                lookup_type['items'][ltype]['nb'] -= tvalue
+            else:
+                tvalue = 0
+            if 'size' in lookup_type['items'][ltype]:
+                tsize = lookup_type['items'][ltype]['size']
+            else:
+                tsize = 0
+
+            statsd.gauge('%s.%i.lookuptype.items.%s.request_nb'%(hostname, os.getpid(),ltype), tvalue, delta=True)
+            #statsd.incr('%s.%i.lookuptype.items.%s.request_nb'%(hostname, os.getpid(),ltype), tvalue)
+        
+            statsd.gauge('%s.%i.lookuptype.items.%s.size'%(hostname, os.getpid(),ltype), tsize)
+
+    if 'not_allowed' in lookup_type:
+        for naltype in lookup_type['not_allowed']:
+            natvalue = lookup_type['not_allowed'][naltype]
+            lookup_type['not_allowed'][naltype] -= natvalue
+            statsd.gauge('%s.%i.lookuptype.not_allowed.%s.request_nb'%(hostname, os.getpid(),naltype), natvalue, delta=True)
+
+    if 'env' in lookup_type:
+        for env in lookup_type['env']:
+            if 'items' in lookup_type['env'][env]:
+                for ltype in lookup_type['env'][env]['items']:
+                    if 'nb' in lookup_type['env'][env]['items'][ltype]:
+                        tvalue = lookup_type['env'][env]['items'][ltype]['nb']
+                        lookup_type['env'][env]['items'][ltype]['nb'] -= tvalue
+
+                        statsd.gauge('%s.%i.lookuptype.env.%s.items.%s.request_nb'%(hostname, os.getpid(), env, ltype), tvalue, delta=True)
+
+            if 'pmodules' in lookup_type['env'][env]:
+                for pmodule in lookup_type['env'][env]['pmodules']:
+                    if 'items' in lookup_type['env'][env]['pmodules'][pmodule]:
+                        for ltype in lookup_type['env'][env]['pmodules'][pmodule]['items']:
+                            if 'nb' in lookup_type['env'][env]['pmodules'][pmodule]['items'][ltype]:
+                                tvalue = lookup_type['env'][env]['pmodules'][pmodule]['items'][ltype]['nb']
+                                lookup_type['env'][env]['pmodules'][pmodule]['items'][ltype]['nb'] -= tvalue
+                                statsd.gauge('%s.%i.lookuptype.env.%s.pmodules.%s.items.%s.request_nb'%(hostname, os.getpid(), env, pmodule, ltype), tvalue, delta=True)
+  
+        
 
     statsd.gauge('%s.%i.profiling.memory.used'%(hostname, os.getpid()), memory_usage())
 
@@ -180,13 +224,64 @@ async def fgetp1(request, cache, ttl=60):
 
 async def method(request):
     cache = request.app['cache']
+    lookup_type = request.app['lookup_type']
     ttl = request.app['config']['cache']['ttl']
     #uri = urlencode('%s://%s:%s%s'%(request.app['config']['foreman']['scheme'], request.app['config']['foreman']['host'], request.app['config']['foreman']['port'], request.rel_url))
     uri = '%s://%s:%s%s'%(request.app['config']['foreman']['scheme'], request.app['config']['foreman']['host'], request.app['config']['foreman']['port'], request.rel_url)
     result = {}
 
+    ## metrics management - TODO create dedicated func
+
     if request.match_info['item'] not in request.app['config']['allowed_items']:
+        if 'not_allowed' not in lookup_type:
+            lookup_type['not_allowed'] = {}
+            lookup_type['not_allowed'][request.match_info['item']] = 1
+        else:
+            if request.match_info['item'] not in lookup_type['not_allowed']:
+                lookup_type['not_allowed'][request.match_info['item']] = 1
+            else:
+                lookup_type['not_allowed'][request.match_info['item']] = +1
         return web.Response(status=404)
+
+    if 'items' not in lookup_type:
+        lookup_type['items'] = {}
+
+    if request.match_info['item'] not in lookup_type['items']:
+        lookup_type['items'][request.match_info['item']] = {}
+        lookup_type['items'][request.match_info['item']]['nb'] = 1
+        #lookup_type['items'][request.match_info['item']]['size'] = len(str(foreman_lookup).encode('utf-8'))
+    else:
+        lookup_type['items'][request.match_info['item']]['nb'] += 1
+        #lookup_type['items'][request.match_info['item']]['size'] = (lookup_type['items'][request.match_info['item']]['size'] + len(str(foreman_lookup).encode('utf-8'))) / 2
+
+    if 'Env' in request.headers:
+        if 'env' not in lookup_type:
+            lookup_type['env'] = {}
+        if request.headers['Env'] not in lookup_type['env']:
+            lookup_type['env'][request.headers['Env']] = {}
+            lookup_type['env'][request.headers['Env']]['items'] = {}
+            lookup_type['env'][request.headers['Env']]['items'][request.match_info['item']] ={}
+            lookup_type['env'][request.headers['Env']]['items'][request.match_info['item']]['nb'] = 1
+        else:
+            if request.match_info['item'] not in lookup_type['env'][request.headers['Env']]['items']: 
+                lookup_type['env'][request.headers['Env']]['items'][request.match_info['item']] ={}
+                lookup_type['env'][request.headers['Env']]['items'][request.match_info['item']]['nb'] = 1
+            else:
+                lookup_type['env'][request.headers['Env']]['items'][request.match_info['item']]['nb'] += 1
+        if 'Puppet-Module' in request.headers:
+            if 'pmodules' not in lookup_type['env'][request.headers['Env']]:
+                lookup_type['env'][request.headers['Env']]['pmodules'] = {}
+            if request.headers['Puppet-Module'] not in lookup_type['env'][request.headers['Env']]['pmodules']:
+                lookup_type['env'][request.headers['Env']]['pmodules'][request.headers['Puppet-Module']] = {}
+                lookup_type['env'][request.headers['Env']]['pmodules'][request.headers['Puppet-Module']]['items'] = {}
+                lookup_type['env'][request.headers['Env']]['pmodules'][request.headers['Puppet-Module']]['items'][request.match_info['item']] = {}
+                lookup_type['env'][request.headers['Env']]['pmodules'][request.headers['Puppet-Module']]['items'][request.match_info['item']]['nb'] = 1
+            else:
+                if request.match_info['item'] not in lookup_type['env'][request.headers['Env']]['pmodules'][request.headers['Puppet-Module']]['items']:
+                    lookup_type['env'][request.headers['Env']]['pmodules'][request.headers['Puppet-Module']]['items'][request.match_info['item']] = {}
+                    lookup_type['env'][request.headers['Env']]['pmodules'][request.headers['Puppet-Module']]['items'][request.match_info['item']]['nb'] = 1
+                else:
+                    lookup_type['env'][request.headers['Env']]['pmodules'][request.headers['Puppet-Module']]['items'][request.match_info['item']]['nb'] += 1
 
     if request.match_info['item'] in SPECIAL_ITEMS:
         foreman_lookup = await fget(uri, cache, request, ttl=ttl)
@@ -212,6 +307,7 @@ async def method(request):
             print("cache remove for %s id: %s"%(uri, del_id))
 
     foreman_lookup = await fget(uri, cache, request, ttl=ttl)
+
     if 'subtotal' in foreman_lookup:
         if foreman_lookup['subtotal'] < 0:
             return web.Response(status=502)
@@ -231,17 +327,19 @@ async def cache():
     memcached_host = conf['cache']['memcached_host']
     memcached_port = conf['cache']['memcached_port']
     #cache = Cache(plugins=[HitMissRatioPlugin(), TimingPlugin()])
+    lookup_type = {}
     cache = Cache(Cache.MEMCACHED, endpoint=memcached_host, port=memcached_port, serializer=JsonSerializer(), plugins=[HitMissRatioPlugin(), TimingPlugin()])
 
     if 'statsd' in conf:
         if conf['statsd']['enable']:
             hostname = socket.gethostname().split('.', 1)[0]
             c = statsd.StatsClient(conf['statsd']['host'], conf['statsd']['port'], prefix=conf['statsd']['prefix'])
-            t = MetricsTimer(conf['statsd']['interval'], cache_metrics, cache, c, hostname)
+            t = MetricsTimer(conf['statsd']['interval'], cache_metrics, cache, lookup_type, c, hostname)
 
     app['config'] = conf
 
     user, password, realm = conf['authentication']['user'], conf['authentication']['password'], conf['authentication']['realm']
     await setup(app, AllowedHosts(conf['allowed_hosts']), BasicAuth(user, password, realm))
     app['cache'] = cache
+    app['lookup_type'] = lookup_type
     return app
